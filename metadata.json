@@ -1,0 +1,6 @@
+{
+  "name": "Focus Harar Confession - Telegram Bot & Admin Hub",
+  "description": "Production-ready Telegram Anonymous Confession Bot and Moderation System with 3-language support (English, Amharic, Afaan Oromoo), 5-admin approval workflow, and channel auto-publishing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
