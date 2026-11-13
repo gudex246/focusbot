@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { dbService } from './db.js';
-import { bot, botState, ADMIN_IDS, CHANNEL_ID, notifyAdminsOfNewConfession, setWebhookUrl, removeWebhookAndPoll } from './bot.js';
+import { bot, botState, ADMIN_IDS, CHANNEL_ID, notifyAdminsOfNewConfession, setWebhookUrl, removeWebhookAndPoll, restartPolling } from './bot.js';
 import { CATEGORIES, TRANSLATIONS, formatChannelPost } from './i18n.js';
 
 const router = Router();
@@ -164,11 +164,19 @@ router.post('/confessions/:id/reject', async (req, res) => {
 
 // Direct test ping to a Telegram User ID (e.g. admin or tester)
 router.post('/telegram/test-ping', async (req, res) => {
-  const { userId = '5668244074', message = '🔔 Focus Harar Bot Test: System is online, active, and responsive right now!' } = req.body;
+  const { userId = '674224568', message = '🔔 Focus Harar Bot Test: System is online, active, and responsive right now!' } = req.body;
 
   try {
-    const sent = await bot.telegram.sendMessage(userId, `🕊️ <b>Focus Harar Confession Bot</b>\n\n${message}\n\n⏰ <b>Timestamp:</b> ${new Date().toISOString()}`, {
+    const sent = await bot.telegram.sendMessage(userId, `🕊️ <b>Focus Harar Confession Bot</b>\n\n${message}\n\n⏰ <b>Timestamp:</b> ${new Date().toLocaleTimeString()}\n\n👇 Tap below to submit a confession, prayer request, or testimony:`, {
       parse_mode: 'HTML',
+      reply_markup: {
+        keyboard: [
+          [{ text: '✍️ Submit Confession' }],
+          [{ text: '🛡️ Privacy & Guidelines' }, { text: '🌐 Change Language' }],
+          [{ text: '📢 Join Our Channel' }]
+        ],
+        resize_keyboard: true
+      }
     });
     dbService.logActivity('TEST_PING_SENT', `Direct ping sent to Telegram user ${userId}`);
     res.json({
@@ -183,6 +191,17 @@ router.post('/telegram/test-ping', async (req, res) => {
       error: err.message,
       hint: 'The user must have opened the bot chat and pressed Start at least once for Telegram to allow direct messages.',
     });
+  }
+});
+
+// Reset all user sessions to clean idle state
+router.post('/telegram/reset-user-sessions', (req, res) => {
+  try {
+    const count = dbService.clearUserSession('ALL');
+    dbService.logActivity('SESSIONS_RESET', 'All user sessions reset to clean idle state');
+    res.json({ success: true, message: 'All user sessions have been refreshed and reset to idle.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -281,6 +300,15 @@ router.post('/bot/set-webhook', async (req, res) => {
 router.post('/bot/set-polling', async (req, res) => {
   const result = await removeWebhookAndPoll();
   res.json(result);
+});
+
+router.post('/bot/restart', async (req, res) => {
+  try {
+    const state = await restartPolling();
+    res.json({ success: true, bot: state, message: 'Telegram bot polling refreshed and active!' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 router.get('/bot/webhook-info', async (req, res) => {

@@ -112,6 +112,8 @@ export interface BotState {
   error: string | null;
   startedAt: string | null;
   lastActiveAt: string;
+  lastPollAt: string | null;
+  pollCycles: number;
 }
 
 export const botState: BotState = {
@@ -122,6 +124,8 @@ export const botState: BotState = {
   error: null,
   startedAt: null,
   lastActiveAt: new Date().toISOString(),
+  lastPollAt: null,
+  pollCycles: 0,
 };
 
 // Outbound rate limiter per chat to prevent Telegram 429 penalties
@@ -236,7 +240,7 @@ async function handleStartFlow(ctx: any) {
 }
 
 bot.command(['start', 'restart', 'reset'], handleStartFlow);
-bot.hears(/^(start|restart|reset|menu|hi|hello|helli|hey|hola|ሰላም|akkam)\b/i, handleStartFlow);
+bot.hears(/^\s*(start|restart|reset|menu|hi|hello|helli|hey|hola|ሰላም|akkam)\s*$/i, handleStartFlow);
 
 // /help and /menu commands
 bot.command(['help', 'menu'], async (ctx) => {
@@ -319,12 +323,12 @@ bot.command('channel', async (ctx) => {
   );
 });
 
-// Text matching for main menu buttons - supports exact strings and multi-lingual keywords
+// Text matching for main menu buttons - supports exact strings and clean keywords
 bot.hears([
   '✍️ Submit Confession',
   '✍️ መልእክት / ንስሐ ላክ',
   '✍️ Yaada / Qalbii Jijjiirraa Ergi',
-  /^(✍️|submit|መልእክት|ንስሐ|yaada|qalbii)\b/i,
+  /^\s*(✍️|submit\s+confession|submit)\s*$/i,
 ], async (ctx) => {
   await initiateSubmission(ctx);
 });
@@ -333,7 +337,7 @@ bot.hears([
   '🛡️ Privacy & Guidelines',
   '🛡️ ሚስጥራዊነትና መመሪያ',
   '🛡️ Iccitiifi Qajeelfama',
-  /^(🛡️|privacy|rules|ሚስጥራዊነት|መመሪያ|iccitii|qajeelfama)\b/i,
+  /^\s*(🛡️|privacy|rules|policy|guidelines|ሚስጥራዊነት|መመሪያ|iccitii|qajeelfama)\s*$/i,
 ], async (ctx) => {
   const userId = String(ctx.from.id);
   const session = dbService.getUserSession(userId);
@@ -346,7 +350,7 @@ bot.hears([
   '🌐 Change Language',
   '🌐 ቋንቋ ቀይር',
   '🌐 Afaan Jijjiiri',
-  /^(🌐|language|lang|ቋንቋ|afaan)\b/i,
+  /^\s*(🌐|language|lang|ቋንቋ|afaan)\s*$/i,
 ], async (ctx) => {
   const userId = String(ctx.from.id);
   const session = dbService.getUserSession(userId);
@@ -359,7 +363,7 @@ bot.hears([
   '📢 Join Our Channel',
   '📢 ቻናላችንን ተቀላቀል',
   '📢 Chaanaalii Keenya',
-  /^(📢|channel|ቻናል|chaanaalii)\b/i,
+  /^\s*(📢|channel|ቻናል|chaanaalii)\s*$/i,
 ], async (ctx) => {
   const userId = String(ctx.from.id);
   const session = dbService.getUserSession(userId);
@@ -380,7 +384,7 @@ bot.hears([
   '❌ ሰርዝ',
   '❌ Haqi',
   '/cancel',
-  /^(❌|cancel|ሰርዝ|haqi)\b/i,
+  /^\s*(❌|cancel|ሰርዝ|haqi)\s*$/i,
 ], async (ctx) => {
   const userId = String(ctx.from.id);
   const session = dbService.getUserSession(userId);
@@ -467,23 +471,28 @@ bot.on('text', async (ctx, next) => {
   const lang = (session.language as Language) || 'en';
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
 
-  // If in text-writing step OR updating text during confirmation
-  if ((session.step === 'waiting_for_text' || session.step === 'awaiting_confirmation') && session.category) {
-    if (text.length < 3) {
-      await safeReply(ctx, '⚠️ Please provide a message of at least 3 characters.');
-      return;
-    }
+  // If user is writing text, or typed message while choosing category, or sent any text while idle
+  const isSubmissionText =
+    session.step === 'waiting_for_text' ||
+    session.step === 'awaiting_confirmation' ||
+    session.step === 'choosing_category' ||
+    (session.step === 'idle' && text.length >= 2);
+
+  if (isSubmissionText) {
     if (text.length > 3000) {
       await safeReply(ctx, '⚠️ Message too long. Please keep it under 3,000 characters.');
       return;
     }
 
+    const assignedCategory = session.category || 'prayer';
+
     dbService.updateUserSession(userId, {
       step: 'awaiting_confirmation',
+      category: assignedCategory,
       pendingText: text,
     });
 
-    const catName = getCategoryName(session.category, lang);
+    const catName = getCategoryName(assignedCategory, lang);
 
     await safeReply(
       ctx,
@@ -496,16 +505,37 @@ bot.on('text', async (ctx, next) => {
     return;
   }
 
-  // Not in a submission text step - pass to bot.hears or general fallback
+  // Not a submission text - pass to bot.hears or general fallback
   return next();
 });
 
-// Fallback text handler for non-flow text
+// Fallback text handler for any remaining unhandled text
 bot.hears(/.+/, async (ctx) => {
   const userId = String(ctx.from.id);
+  const text = ctx.message.text ? ctx.message.text.trim() : '';
   const session = dbService.getUserSession(userId);
   const lang = (session.language as Language) || 'en';
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+
+  // If there is any content, capture it immediately as a prayer request so the user is never ignored!
+  if (text.length >= 2) {
+    const assignedCategory = 'prayer';
+    dbService.updateUserSession(userId, {
+      step: 'awaiting_confirmation',
+      category: assignedCategory,
+      pendingText: text,
+    });
+    const catName = getCategoryName(assignedCategory, lang);
+    await safeReply(
+      ctx,
+      t.confirm_prompt(catName, text),
+      Markup.inlineKeyboard([
+        [Markup.button.callback(t.btn_confirm, 'confirm_submit')],
+        [Markup.button.callback(t.btn_cancel, 'action_cancel')],
+      ])
+    );
+    return;
+  }
 
   await safeReply(
     ctx,
@@ -886,9 +916,11 @@ bot.action('admin_refresh_stats', async (ctx) => {
 // Bot Lifecycle & Keep-Alive Manager
 // ----------------------------------------------------
 
-let pollingRunning = false;
+let launchRetryTimer: NodeJS.Timeout | null = null;
+let isLaunching = false;
 
 export async function launchBot() {
+  if (isLaunching) return;
   if (!BOT_TOKEN || BOT_TOKEN.includes('MY_BOT_TOKEN')) {
     botState.status = 'error';
     botState.error = 'No Telegram Bot Token provided.';
@@ -896,8 +928,15 @@ export async function launchBot() {
     return;
   }
 
+  isLaunching = true;
+  if (launchRetryTimer) {
+    clearTimeout(launchRetryTimer);
+    launchRetryTimer = null;
+  }
+
   try {
     botState.status = 'starting';
+    botState.error = null;
     const me = await bot.telegram.getMe();
     botState.botUsername = me.username || 'focusconfessionbot';
     console.log(`Telegram Bot verified: @${botState.botUsername} (${me.first_name})`);
@@ -927,9 +966,8 @@ export async function launchBot() {
     } else {
       // Synchronize initial offset to the latest update on Telegram so historical backlog is not replayed
       try {
-        const latest = await bot.telegram.getUpdates(-1, 1, 0, [] as any);
+        const latest = await fetchUpdatesWithTimeout(-1, 0, 1);
         if (latest && latest.length > 0) {
-          // Do not skip the latest update (+1 was dropping incoming fresh clicks)
           currentOffset = latest[0].update_id;
           dbService.setSetting('telegram_update_offset', String(currentOffset));
           console.log(`Synchronized initial Telegram update offset to latest: ${currentOffset}`);
@@ -953,83 +991,126 @@ export async function launchBot() {
       console.warn('Could not check/delete webhook:', e.message);
     }
 
-    // Start robust custom polling loop and active watchdog
+    // Start robust timeout-protected polling loop and active watchdog
     startPolling();
     startWatchdog();
   } catch (err: any) {
     botState.status = 'error';
     botState.error = err.message;
-    console.error('Failed to initialize Telegram Bot:', err);
-    dbService.logActivity('BOT_ERROR', `Bot launch error: ${err.message}`);
+    console.error('Failed to initialize Telegram Bot, retrying in 5s:', err);
+    dbService.logActivity('BOT_ERROR', `Bot launch error (retrying in 5s): ${err.message}`);
+    launchRetryTimer = setTimeout(() => {
+      launchRetryTimer = null;
+      launchBot().catch(() => {});
+    }, 5000);
+  } finally {
+    isLaunching = false;
   }
 }
 
 let isPollingActive = false;
+let pollingGeneration = 0;
 let currentOffset = 0;
 let lastIterationTime = Date.now();
 const processedUpdateIds = new Set<number>();
 
-export function startPolling() {
-  if (isPollingActive) return;
+async function fetchUpdatesWithTimeout(offset: number, timeoutSec = 3, limit = 30): Promise<any[]> {
+  const url = new URL(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`);
+  url.searchParams.set('offset', String(offset));
+  url.searchParams.set('limit', String(limit));
+  url.searchParams.set('timeout', String(timeoutSec));
+  url.searchParams.set('allowed_updates', JSON.stringify(['message', 'callback_query', 'edited_message']));
+
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    signal: AbortSignal.timeout((timeoutSec + 5) * 1000),
+  });
+  const data: any = await res.json();
+  if (!res.ok || !data?.ok) {
+    const err: any = new Error(data?.description || `Telegram HTTP ${res.status}`);
+    err.code = data?.error_code || res.status;
+    throw err;
+  }
+  return Array.isArray(data.result) ? data.result : [];
+}
+
+export function startPolling(forceRestart = false) {
+  if (isPollingActive && !forceRestart) return;
+
+  const myGeneration = ++pollingGeneration;
   isPollingActive = true;
+  lastIterationTime = Date.now();
 
   botState.mode = 'polling';
   botState.status = 'running';
+  botState.error = null;
   botState.startedAt = new Date().toISOString();
-  console.log(`🚀 Telegram Bot @${botState.botUsername} polling loop active (offset: ${currentOffset})!`);
+  console.log(`🚀 Telegram Bot @${botState.botUsername} polling loop active (gen: ${myGeneration}, offset: ${currentOffset})!`);
   dbService.logActivity('BOT_START', `Bot @${botState.botUsername} polling started (offset: ${currentOffset})`);
 
   (async () => {
-    while (isPollingActive) {
+    while (isPollingActive && myGeneration === pollingGeneration) {
       lastIterationTime = Date.now();
       try {
-        // Fast 3-second polling timeout for rapid responsiveness, accepting all update types
-        const updates = await bot.telegram.getUpdates(currentOffset, 30, 3, [] as any);
+        // Fast 3-second polling with strict 8-second AbortSignal timeout so sockets never hang
+        const updates = await fetchUpdatesWithTimeout(currentOffset, 3, 30);
+        if (!isPollingActive || myGeneration !== pollingGeneration) break;
+
         lastIterationTime = Date.now();
+        const nowIso = new Date().toISOString();
+        botState.lastPollAt = nowIso;
+        botState.pollCycles += 1;
+        botState.status = 'running';
+        botState.error = null;
 
-        for (const update of updates) {
-          // Immediately advance and persist offset so update is never re-processed
-          currentOffset = update.update_id + 1;
-          dbService.setSetting('telegram_update_offset', String(currentOffset));
-          botState.lastActiveAt = new Date().toISOString();
+        if (updates.length > 0) {
+          for (const update of updates) {
+            // Immediately advance and persist offset so update is never re-processed
+            currentOffset = update.update_id + 1;
+            dbService.setSetting('telegram_update_offset', String(currentOffset));
+            botState.lastActiveAt = new Date().toISOString();
 
-          if (processedUpdateIds.has(update.update_id)) {
-            continue; // Deduplicated
-          }
-          processedUpdateIds.add(update.update_id);
-          if (processedUpdateIds.size > 2000) {
-            const first = processedUpdateIds.values().next().value;
-            if (first !== undefined) processedUpdateIds.delete(first);
-          }
+            if (processedUpdateIds.has(update.update_id)) {
+              continue; // Deduplicated
+            }
+            processedUpdateIds.add(update.update_id);
+            if (processedUpdateIds.size > 2000) {
+              const first = processedUpdateIds.values().next().value;
+              if (first !== undefined) processedUpdateIds.delete(first);
+            }
 
-          // Only drop messages that are over 4 hours old (14400s).
-          // Messages sent while waiting for container wake-up will be preserved and answered immediately!
-          const isTextMessage = Boolean((update as any).message);
-          const msgDate = (update as any).message?.date;
-          if (isTextMessage && msgDate && (Date.now() / 1000 - msgDate > 14400)) {
-            console.log(`[STALE MESSAGE SKIPPED] Text update ${update.update_id} was sent ${Math.round(Date.now() / 1000 - msgDate)}s ago, skipping.`);
-            continue;
-          }
+            // Preserve updates up to 24 hours old (Telegram's retention limit) so sleep wake-up still answers
+            const isTextMessage = Boolean(update.message);
+            const msgDate = update.message?.date;
+            if (isTextMessage && msgDate && (Date.now() / 1000 - msgDate > 86400)) {
+              console.log(`[STALE MESSAGE SKIPPED] Text update ${update.update_id} older than 24h, skipping.`);
+              continue;
+            }
 
-          try {
-            await bot.handleUpdate(update);
-          } catch (handleErr: any) {
-            console.error(`Error processing update ${update.update_id}:`, handleErr?.message || handleErr);
+            try {
+              await bot.handleUpdate(update);
+            } catch (handleErr: any) {
+              console.error(`Error processing update ${update.update_id}:`, handleErr?.message || handleErr);
+            }
           }
+          dbService.checkpoint('PASSIVE');
+        } else if (botState.pollCycles % 20 === 0) {
+          dbService.checkpoint('PASSIVE');
         }
       } catch (err: any) {
+        if (!isPollingActive || myGeneration !== pollingGeneration) break;
         lastIterationTime = Date.now();
-        botState.lastActiveAt = new Date().toISOString();
         const msg = err?.message || String(err);
-        if (msg.includes('409')) {
-          console.warn('Telegram 409 Conflict: waiting 2s for conflicting process to clear...');
+        if (err?.code === 409 || msg.includes('409')) {
+          console.warn('Telegram 409 Conflict: waiting 2s for other poller to clear...');
           await new Promise((r) => setTimeout(r, 2000));
-        } else if (msg.includes('429')) {
+        } else if (err?.code === 429 || msg.includes('429')) {
           const match = msg.match(/retry after (\d+)/i);
           const waitSec = match ? parseInt(match[1], 10) : 5;
           console.warn(`Telegram 429 rate limit in polling loop, backing off for ${waitSec}s...`);
           await new Promise((r) => setTimeout(r, (waitSec + 1) * 1000));
         } else {
+          botState.error = msg;
           console.warn('Telegram polling error, retrying in 1.5s:', msg);
           await new Promise((r) => setTimeout(r, 1500));
         }
@@ -1037,11 +1118,27 @@ export function startPolling() {
     }
   })().catch((loopErr) => {
     console.error('Fatal polling error, restarting in 2s:', loopErr);
-    isPollingActive = false;
-    setTimeout(() => {
-      if (!isPollingActive) startPolling();
-    }, 2000);
+    if (myGeneration === pollingGeneration) {
+      isPollingActive = false;
+      setTimeout(() => {
+        if (!isPollingActive && myGeneration === pollingGeneration) startPolling();
+      }, 2000);
+    }
   });
+}
+
+export async function restartPolling(): Promise<BotState> {
+  if (botState.mode === 'webhook') {
+    await removeWebhookAndPoll();
+    return botState;
+  }
+  if (botState.status === 'error' || botState.status === 'idle') {
+    await launchBot();
+    return botState;
+  }
+  startPolling(true);
+  startWatchdog();
+  return botState;
 }
 
 let watchdogTimer: NodeJS.Timeout | null = null;
@@ -1050,10 +1147,9 @@ export function startWatchdog() {
   if (watchdogTimer) return;
   watchdogTimer = setInterval(() => {
     if (botState.mode === 'polling') {
-      if (!isPollingActive || Date.now() - lastIterationTime > 25000) {
-        console.log('[WATCHDOG] Reviving Telegram polling loop...');
-        isPollingActive = false;
-        startPolling();
+      if (!isPollingActive || Date.now() - lastIterationTime > 20000) {
+        console.log('[WATCHDOG] Reviving stalled Telegram polling loop...');
+        startPolling(true);
       }
     }
   }, 10000);
@@ -1067,9 +1163,11 @@ export function stopWatchdog() {
 }
 
 export function stopPolling() {
+  pollingGeneration++;
   isPollingActive = false;
   stopWatchdog();
   botState.status = 'idle';
+  dbService.checkpoint('TRUNCATE');
 }
 
 // Set Webhook for 24/7 immediate wake-up
@@ -1101,7 +1199,8 @@ export async function removeWebhookAndPoll(): Promise<{ success: boolean; messag
   try {
     await bot.telegram.deleteWebhook({ drop_pending_updates: false });
     botState.webhookUrl = null;
-    startPolling();
+    startPolling(true);
+    startWatchdog();
     dbService.logActivity('WEBHOOK_REMOVED', 'Webhook deleted, switched back to long-polling');
     return { success: true, message: 'Switched back to real-time polling mode' };
   } catch (err: any) {

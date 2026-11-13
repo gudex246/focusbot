@@ -32,6 +32,9 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     botStatus: botState.status,
     botMode: botState.mode,
+    lastPollAt: botState.lastPollAt,
+    pollCycles: botState.pollCycles,
+    uptimeSeconds: process.uptime(),
     timestamp: new Date().toISOString(),
   });
 });

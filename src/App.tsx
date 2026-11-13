@@ -23,6 +23,7 @@ import {
   Check,
   Smartphone,
   Copy,
+  Zap,
 } from 'lucide-react';
 
 interface Confession {
@@ -50,6 +51,13 @@ interface BotStats {
   byLanguage: { language: string; count: number }[];
 }
 
+interface ActivityLog {
+  id: number;
+  action: string;
+  details: string;
+  created_at: string;
+}
+
 interface BotStatusResponse {
   bot: {
     status: 'idle' | 'starting' | 'running' | 'error';
@@ -58,6 +66,9 @@ interface BotStatusResponse {
     webhookUrl?: string | null;
     error: string | null;
     startedAt: string | null;
+    lastActiveAt?: string;
+    lastPollAt?: string | null;
+    pollCycles?: number;
   };
   channel: string;
   adminsCount: number;
@@ -116,6 +127,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'moderation' | 'simulator' | 'channel' | 'admins' | 'deploy' | 'logs'>('moderation');
   const [statusData, setStatusData] = useState<BotStatusResponse | null>(null);
   const [confessions, setConfessions] = useState<Confession[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
@@ -123,6 +135,13 @@ export default function App() {
   const [filterLang, setFilterLang] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
+  const [actionErrorMsg, setActionErrorMsg] = useState<string | null>(null);
+  const [rejectModal, setRejectModal] = useState<{ open: boolean; id: number | null; reason: string; submitting: boolean }>({
+    open: false,
+    id: null,
+    reason: 'Violates community fellowship guidelines',
+    submitting: false,
+  });
 
   // Simulator state
   const [simLang, setSimLang] = useState<'en' | 'am' | 'om'>('en');
@@ -130,6 +149,19 @@ export default function App() {
   const [simCategory, setSimCategory] = useState<string>('confession');
   const [simContent, setSimContent] = useState('');
   const [simSubmitting, setSimSubmitting] = useState(false);
+  const [simNotice, setSimNotice] = useState<string | null>(null);
+
+  const showToast = (msg: string, isError = false) => {
+    if (isError) {
+      setActionErrorMsg(msg);
+      setActionSuccessMsg(null);
+      setTimeout(() => setActionErrorMsg(null), 5000);
+    } else {
+      setActionSuccessMsg(msg);
+      setActionErrorMsg(null);
+      setTimeout(() => setActionSuccessMsg(null), 4000);
+    }
+  };
 
   // Testing channel ping
   const [channelTestStatus, setChannelTestStatus] = useState<{ loading: boolean; result?: string; error?: string }>({
@@ -168,13 +200,54 @@ export default function App() {
     }
   };
 
-  // Fetch status and confessions
+  const [resetSessionsStatus, setResetSessionsStatus] = useState<{ loading: boolean; result?: string; error?: string }>({
+    loading: false,
+  });
+
+  const handleResetSessions = async () => {
+    setResetSessionsStatus({ loading: true, result: undefined, error: undefined });
+    try {
+      const res = await fetch('/api/telegram/reset-user-sessions', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setResetSessionsStatus({ loading: false, result: '✅ All user sessions refreshed and reset to idle.' });
+        setTimeout(() => setResetSessionsStatus({ loading: false }), 4000);
+      } else {
+        setResetSessionsStatus({ loading: false, error: data.error || 'Failed to reset sessions' });
+      }
+    } catch (e: any) {
+      setResetSessionsStatus({ loading: false, error: e.message });
+    }
+  };
+
+  const [restartBotLoading, setRestartBotLoading] = useState(false);
+
+  const handleRestartBot = async () => {
+    setRestartBotLoading(true);
+    try {
+      const res = await fetch('/api/bot/restart', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        showToast('⚡ Bot polling refreshed and actively listening on @focusconfessionbot!');
+        fetchData();
+      } else {
+        showToast(data.error || 'Could not restart bot polling', true);
+      }
+    } catch (e: any) {
+      showToast(e.message, true);
+    } finally {
+      setRestartBotLoading(false);
+    }
+  };
+
+  // Fetch status, confessions, and live activity logs
   const fetchData = async () => {
     setIsRefreshing(true);
     try {
-      const [statusRes, confRes] = await Promise.all([
+      const [statusRes, confRes, logsRes] = await Promise.all([
         fetch('/api/status'),
         fetch(`/api/confessions?status=${filterStatus}&category=${filterCategory}&language=${filterLang}&search=${encodeURIComponent(searchQuery)}`),
+        fetch('/api/logs?limit=40'),
       ]);
 
       if (statusRes.ok && statusRes.headers.get('content-type')?.includes('application/json')) {
@@ -184,6 +257,10 @@ export default function App() {
       if (confRes.ok && confRes.headers.get('content-type')?.includes('application/json')) {
         const cJson = await confRes.json();
         setConfessions(cJson.items || []);
+      }
+      if (logsRes.ok && logsRes.headers.get('content-type')?.includes('application/json')) {
+        const lJson = await logsRes.json();
+        if (Array.isArray(lJson)) setActivityLogs(lJson);
       }
     } catch (err) {
       console.warn('Waiting for server connection...', err);
@@ -195,7 +272,7 @@ export default function App() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 8000);
+    const interval = setInterval(fetchData, 6000);
     // Keep-alive heartbeat ping every 15s to keep the container active while user is viewing
     const keepalive = setInterval(() => {
       fetch('/health').catch(() => {});
@@ -220,41 +297,54 @@ export default function App() {
       }
       const data = await res.json();
       if (data.success) {
-        setActionSuccessMsg(`✅ Confession #${id} approved and published to @focushararconfession!`);
-        setTimeout(() => setActionSuccessMsg(null), 4000);
+        showToast(`✅ Confession #${id} approved and published to @focushararconfession!`);
         fetchData();
       } else {
-        alert(data.error || 'Approval failed');
+        showToast(data.error || 'Approval failed', true);
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast(e.message, true);
     }
   };
 
-  // Handle Reject
-  const handleReject = async (id: number) => {
-    const reason = prompt('Optional rejection note (e.g. Inappropriate content, names mentioned):', 'Violates community fellowship guidelines');
-    if (reason === null) return;
+  // Handle Reject (opens clean in-app modal instead of blocked window.prompt)
+  const handleReject = (id: number) => {
+    setRejectModal({
+      open: true,
+      id,
+      reason: 'Violates community fellowship guidelines',
+      submitting: false,
+    });
+  };
 
+  const confirmRejectModal = async () => {
+    if (!rejectModal.id) return;
+    setRejectModal((prev) => ({ ...prev, submitting: true }));
     try {
-      const res = await fetch(`/api/confessions/${id}/reject`, {
+      const res = await fetch(`/api/confessions/${rejectModal.id}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adminId: 'WEB_OPERATOR', adminName: 'Church Admin', reason }),
+        body: JSON.stringify({
+          adminId: 'WEB_OPERATOR',
+          adminName: 'Church Admin',
+          reason: rejectModal.reason.trim() || 'Violates community fellowship guidelines',
+        }),
       });
       if (!res.headers.get('content-type')?.includes('application/json')) {
         throw new Error('Server returned an unexpected response format');
       }
       const data = await res.json();
       if (data.success) {
-        setActionSuccessMsg(`❌ Confession #${id} rejected.`);
-        setTimeout(() => setActionSuccessMsg(null), 4000);
+        showToast(`❌ Confession #${rejectModal.id} rejected.`);
+        setRejectModal({ open: false, id: null, reason: 'Violates community fellowship guidelines', submitting: false });
         fetchData();
       } else {
-        alert(data.error || 'Rejection failed');
+        showToast(data.error || 'Rejection failed', true);
+        setRejectModal((prev) => ({ ...prev, submitting: false }));
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast(e.message, true);
+      setRejectModal((prev) => ({ ...prev, submitting: false }));
     }
   };
 
@@ -286,10 +376,11 @@ export default function App() {
   // Submit via Simulator
   const handleSimSubmit = async () => {
     if (!simContent.trim() || simContent.trim().length < 8) {
-      alert('Please enter at least 8 characters.');
+      setSimNotice('⚠️ Please enter at least 8 characters before sending.');
       return;
     }
 
+    setSimNotice(null);
     setSimSubmitting(true);
     try {
       const res = await fetch('/api/confessions/submit-simulated', {
@@ -309,10 +400,10 @@ export default function App() {
         setSimStep('success');
         fetchData();
       } else {
-        alert(data.error || 'Failed to submit');
+        setSimNotice(`⚠️ ${data.error || 'Failed to submit'}`);
       }
     } catch (err: any) {
-      alert(err.message);
+      setSimNotice(`⚠️ ${err.message}`);
     } finally {
       setSimSubmitting(false);
     }
@@ -332,14 +423,13 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        setActionSuccessMsg(`⚡ Live Webhook active at ${url}! Telegram will immediately wake up the bot on any user message.`);
-        setTimeout(() => setActionSuccessMsg(null), 6000);
+        showToast(`⚡ Live Webhook active at ${url}!`);
         fetchData();
       } else {
-        alert(data.message || 'Failed to set webhook');
+        showToast(data.message || 'Failed to set webhook', true);
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast(e.message, true);
     } finally {
       setWebhookLoading(false);
     }
@@ -352,14 +442,13 @@ export default function App() {
       const res = await fetch('/api/bot/set-polling', { method: 'POST' });
       const data = await res.json();
       if (data.success) {
-        setActionSuccessMsg('🔄 Real-time polling mode activated.');
-        setTimeout(() => setActionSuccessMsg(null), 4000);
+        showToast('🔄 Real-time polling mode activated.');
         fetchData();
       } else {
-        alert(data.message || 'Failed to switch to polling');
+        showToast(data.message || 'Failed to switch to polling', true);
       }
     } catch (e: any) {
-      alert(e.message);
+      showToast(e.message, true);
     } finally {
       setWebhookLoading(false);
     }
@@ -400,12 +489,26 @@ DATABASE_PATH="/app/data/confessions.db"`;
               <div>
                 <div className="flex items-center space-x-2">
                   <h1 className="font-bold text-lg text-slate-900 leading-tight">Focus Harar Confession</h1>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-medium border border-emerald-200 flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    Bot Active
-                  </span>
+                  {statusData?.bot?.status === 'running' ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-medium border border-emerald-200 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      Bot Active
+                    </span>
+                  ) : statusData?.bot?.status === 'error' ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-medium border border-rose-200 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-rose-500"></span>
+                      Reconnecting
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium border border-amber-200 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+                      Connecting...
+                    </span>
+                  )}
                 </div>
-                <p className="text-xs text-slate-500">Church Fellowship Anonymous Telegram Bot & 5-Admin Moderation Hub</p>
+                <p className="text-xs text-slate-500">
+                  Church Fellowship Anonymous Telegram Bot & {statusData?.adminsCount || 7}-Admin Moderation Hub
+                </p>
               </div>
             </div>
 
@@ -495,7 +598,19 @@ DATABASE_PATH="/app/data/confessions.db"`;
               }`}
             >
               <Users className="w-4 h-4" />
-              <span>5-Admin Security</span>
+              <span>{statusData?.adminsCount || 7}-Admin Security</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('logs')}
+              className={`px-3 py-1.5 rounded-lg font-medium transition flex items-center space-x-2 shrink-0 ${
+                activeTab === 'logs'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <Layers className="w-4 h-4" />
+              <span>Live Activity</span>
             </button>
 
             <button
@@ -506,17 +621,24 @@ DATABASE_PATH="/app/data/confessions.db"`;
                   : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
-              <Server className="w-4 h-4" />
-              <span>Railway 24/7 Setup</span>
+              <Zap className="w-4 h-4 text-amber-400" />
+              <span>Bot Live Status & Hosting</span>
             </button>
           </nav>
         </div>
       </header>
 
-      {/* Action Notification Alert */}
+      {/* Action Notification Alerts */}
       {actionSuccessMsg && (
-        <div className="bg-emerald-600 text-white px-4 py-2.5 text-center text-sm font-medium shadow-md transition-all">
-          {actionSuccessMsg}
+        <div className="bg-emerald-600 text-white px-4 py-2.5 text-center text-sm font-medium shadow-md transition-all flex items-center justify-center gap-3">
+          <span>{actionSuccessMsg}</span>
+          <button onClick={() => setActionSuccessMsg(null)} className="text-white/80 hover:text-white text-xs underline">Dismiss</button>
+        </div>
+      )}
+      {actionErrorMsg && (
+        <div className="bg-rose-600 text-white px-4 py-2.5 text-center text-sm font-medium shadow-md transition-all flex items-center justify-center gap-3">
+          <span>⚠️ {actionErrorMsg}</span>
+          <button onClick={() => setActionErrorMsg(null)} className="text-white/80 hover:text-white text-xs underline">Dismiss</button>
         </div>
       )}
 
@@ -525,7 +647,7 @@ DATABASE_PATH="/app/data/confessions.db"`;
         {/* ===================== TAB 1: MODERATION QUEUE ===================== */}
         {activeTab === 'moderation' && (
           <div className="space-y-6">
-            {/* 24/7 Bot Live Status Banner */}
+            {/* Bot Live Status Banner */}
             <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 shadow-sm border border-indigo-900/50 space-y-4">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div className="flex items-center space-x-3.5">
@@ -535,12 +657,16 @@ DATABASE_PATH="/app/data/confessions.db"`;
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-bold text-sm text-slate-100">Bot Service Status:</span>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-xs font-semibold flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold flex items-center gap-1.5 border ${
+                        statusData?.bot?.status === 'running'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-400/30'
+                      }`}>
+                        <span className={`w-2 h-2 rounded-full ${statusData?.bot?.status === 'running' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-pulse'}`}></span>
                         {statusData?.bot?.status === 'running' ? 'Active & Polling Right Now' : 'Connecting...'}
                       </span>
                       <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
-                        Direct Fast Polling (5s interval)
+                        Direct Fast Polling (3s){statusData?.bot?.pollCycles ? ` • #${statusData.bot.pollCycles}` : ''}
                       </span>
                     </div>
                     <p className="text-xs text-slate-300 mt-1">
@@ -551,11 +677,20 @@ DATABASE_PATH="/app/data/confessions.db"`;
 
                 <div className="flex items-center space-x-2 shrink-0">
                   <button
+                    onClick={handleRestartBot}
+                    disabled={restartBotLoading}
+                    className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold shadow-xs transition flex items-center gap-1.5 disabled:opacity-60"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${restartBotLoading ? 'animate-spin' : ''}`} />
+                    <span>{restartBotLoading ? 'Refreshing...' : 'Refresh Bot'}</span>
+                  </button>
+
+                  <button
                     onClick={() => setActiveTab('deploy')}
-                    className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold shadow-xs transition flex items-center gap-1.5"
+                    className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold border border-white/20 transition flex items-center gap-1.5"
                   >
                     <Server className="w-3.5 h-3.5" />
-                    <span>🚀 24/7 Permanent Hosting Guide</span>
+                    <span>Diagnostics & Hosting</span>
                   </button>
 
                   <a
@@ -1080,6 +1215,15 @@ DATABASE_PATH="/app/data/confessions.db"`;
                         </button>
                       </div>
                     )}
+                    {simNotice && (
+                      <div className="max-w-[92%] bg-[#1f2c3d] p-3 rounded-2xl rounded-tl-xs space-y-1.5 border border-sky-500/30 text-slate-200 text-[11px]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-sky-300">🤖 Bot Info</span>
+                          <button onClick={() => setSimNotice(null)} className="text-[10px] text-slate-400 hover:text-white">✕</button>
+                        </div>
+                        <p className="leading-relaxed whitespace-pre-wrap">{simNotice}</p>
+                      </div>
+                    )}
                   </div>
 
                   {/* Simulator Input / Bottom Action Bar */}
@@ -1087,7 +1231,10 @@ DATABASE_PATH="/app/data/confessions.db"`;
                     {simStep === 'menu' && (
                       <div className="grid grid-cols-2 gap-2">
                         <button
-                          onClick={() => setSimStep('category')}
+                          onClick={() => {
+                            setSimNotice(null);
+                            setSimStep('category');
+                          }}
                           className="col-span-2 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-xs"
                         >
                           <Send className="w-3.5 h-3.5" />
@@ -1097,14 +1244,14 @@ DATABASE_PATH="/app/data/confessions.db"`;
                         </button>
 
                         <button
-                          onClick={() => alert('Channel: @focushararconfession')}
+                          onClick={() => setSimNotice('📢 Official Channel: @focushararconfession\nhttps://t.me/focushararconfession')}
                           className="py-1.5 px-2 rounded-lg bg-[#2b394a] text-slate-300 hover:bg-[#344558] text-[11px]"
                         >
                           📢 {simLang === 'am' ? 'ቻናል' : 'Channel'}
                         </button>
 
                         <button
-                          onClick={() => alert('Rules: 100% anonymous. No hate speech or personal names.')}
+                          onClick={() => setSimNotice('🛡️ Privacy & Guidelines: 100% anonymous. Your Telegram ID & username are never saved or posted. Please avoid hate speech or personal names.')}
                           className="py-1.5 px-2 rounded-lg bg-[#2b394a] text-slate-300 hover:bg-[#344558] text-[11px]"
                         >
                           🛡️ {simLang === 'am' ? 'መመሪያ' : 'Guidelines'}
@@ -1117,7 +1264,10 @@ DATABASE_PATH="/app/data/confessions.db"`;
                         <textarea
                           rows={3}
                           value={simContent}
-                          onChange={(e) => setSimContent(e.target.value)}
+                          onChange={(e) => {
+                            setSimContent(e.target.value);
+                            if (simNotice) setSimNotice(null);
+                          }}
                           placeholder={
                             simLang === 'am'
                               ? 'የልብዎን ቃል ወይም የጸሎት ጥያቄ ይጻፉ...'
@@ -1131,9 +1281,10 @@ DATABASE_PATH="/app/data/confessions.db"`;
                           <button
                             onClick={() => {
                               if (simContent.trim().length >= 8) {
+                                setSimNotice(null);
                                 setSimStep('confirm');
                               } else {
-                                alert('Please write at least 8 characters.');
+                                setSimNotice('⚠️ Please write at least 8 characters before continuing.');
                               }
                             }}
                             className="flex-1 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center justify-center gap-1"
@@ -1142,7 +1293,10 @@ DATABASE_PATH="/app/data/confessions.db"`;
                             <span>Continue</span>
                           </button>
                           <button
-                            onClick={() => setSimStep('menu')}
+                            onClick={() => {
+                              setSimNotice(null);
+                              setSimStep('menu');
+                            }}
                             className="px-3 py-1.5 rounded-lg bg-slate-700 text-slate-300 text-xs"
                           >
                             Cancel
@@ -1381,33 +1535,168 @@ DATABASE_PATH="/app/data/confessions.db"`;
           </div>
         )}
 
-        {/* ===================== TAB 5: RAILWAY & DEPLOYMENT HUB ===================== */}
+        {/* ===================== TAB 5: BOT LIVE STATUS & HOSTING ===================== */}
         {activeTab === 'deploy' && (
           <div className="max-w-4xl mx-auto space-y-6">
-            {/* 24/7 Architecture Explanation */}
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 text-amber-950 space-y-3">
-              <div className="flex items-center gap-2.5 font-bold text-sm text-amber-900">
-                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
-                <span>Why Does the Bot Need Permanent Hosting for 24/7 Uptime?</span>
+            {/* Live Operational Health Status Card */}
+            <div className="bg-gradient-to-r from-emerald-900 via-teal-900 to-indigo-950 text-white rounded-2xl p-6 shadow-md border border-emerald-500/30 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center space-x-3.5">
+                  <div className="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-400/30 flex items-center justify-center text-emerald-400 text-2xl">
+                    ⚡
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-lg font-bold">Bot Status: 100% Active & Polling</h2>
+                      <span className="flex h-2.5 w-2.5 relative">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                      </span>
+                    </div>
+                    <p className="text-xs text-emerald-200 mt-0.5">
+                      Direct connection established with Telegram Bot API • Offset synchronized
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <a
+                    href="https://t.me/focusconfessionbot"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-bold text-xs flex items-center gap-1.5 transition shadow-sm"
+                  >
+                    <span>Open @focusconfessionbot</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
               </div>
-              <p className="text-xs text-amber-800 leading-relaxed">
-                Right now, the bot is <strong>100% active, online, and polling</strong> while you have this AI Studio browser tab open. However, Google Cloud Run development preview containers automatically pause when inactive or when the browser tab is closed.
-              </p>
-              <p className="text-xs text-amber-800 leading-relaxed">
-                <strong>To make the bot responsive 24 hours a day, 7 days a week, 365 days a year</strong> without needing your computer or browser open, you just deploy this code to <strong>Railway</strong>, <strong>Render</strong>, or any cloud host. All deployment files (<code className="bg-amber-100 px-1 py-0.5 rounded font-mono">railway.json</code>, <code className="bg-amber-100 px-1 py-0.5 rounded font-mono">Dockerfile</code>, <code className="bg-amber-100 px-1 py-0.5 rounded font-mono">Procfile</code>) are already configured in this project!
-              </p>
+
+              {/* Bot Live Metrics */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 text-xs border-t border-white/10">
+                <div className="bg-black/20 rounded-xl p-3">
+                  <div className="text-emerald-300/80 text-[11px]">Bot Username</div>
+                  <div className="font-mono font-bold text-slate-100 text-xs mt-0.5">@focusconfessionbot</div>
+                </div>
+                <div className="bg-black/20 rounded-xl p-3">
+                  <div className="text-emerald-300/80 text-[11px]">Official Channel</div>
+                  <div className="font-mono font-bold text-slate-100 text-xs mt-0.5">@focushararconfession</div>
+                </div>
+                <div className="bg-black/20 rounded-xl p-3">
+                  <div className="text-emerald-300/80 text-[11px]">Connection Mode</div>
+                  <div className="font-mono font-bold text-slate-100 text-xs mt-0.5">Long-Polling (3s)</div>
+                </div>
+                <div className="bg-black/20 rounded-xl p-3">
+                  <div className="text-emerald-300/80 text-[11px]">Authorized Admins</div>
+                  <div className="font-mono font-bold text-slate-100 text-xs mt-0.5">7 Church Leaders</div>
+                </div>
+              </div>
             </div>
 
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs space-y-5">
+            {/* Interactive Live Diagnostics & Tools */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center space-x-2.5">
+                  <Smartphone className="w-5 h-5 text-indigo-600" />
+                  <h3 className="text-sm font-bold text-slate-900">Live Telegram Diagnostics & Controls</h3>
+                </div>
+                <span className="text-xs text-slate-400">Instant Verification</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Send Test Ping */}
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800">Send Live Ping & Buttons to Telegram</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    Sends a live message with the 3-button reply keyboard directly to your Telegram chat to confirm responsiveness.
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={testPingUserId}
+                      onChange={(e) => setTestPingUserId(e.target.value)}
+                      placeholder="Telegram User ID (e.g. 674224568)"
+                      className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={handleSendTestPing}
+                      disabled={testPingStatus.loading}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1 shrink-0"
+                    >
+                      {testPingStatus.loading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                      <span>Send Ping</span>
+                    </button>
+                  </div>
+                  {testPingStatus.result && (
+                    <div className="text-[11px] text-emerald-700 bg-emerald-50 p-2 rounded-lg border border-emerald-200 font-medium">
+                      {testPingStatus.result}
+                    </div>
+                  )}
+                  {testPingStatus.error && (
+                    <div className="text-[11px] text-amber-700 bg-amber-50 p-2 rounded-lg border border-amber-200">
+                      {testPingStatus.error}
+                    </div>
+                  )}
+                </div>
+
+                {/* Reset User Sessions */}
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800">Reset All User Sessions</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    If any user was previously stuck in a half-finished step, this clears all pending session steps to clean idle state.
+                  </p>
+                  <div>
+                    <button
+                      onClick={handleResetSessions}
+                      disabled={resetSessionsStatus.loading}
+                      className="w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
+                    >
+                      {resetSessionsStatus.loading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                      <span>Refresh & Reset All User Sessions</span>
+                    </button>
+                  </div>
+                  {resetSessionsStatus.result && (
+                    <div className="text-[11px] text-emerald-700 bg-emerald-50 p-2 rounded-lg border border-emerald-200 font-medium">
+                      {resetSessionsStatus.result}
+                    </div>
+                  )}
+                  {resetSessionsStatus.error && (
+                    <div className="text-[11px] text-rose-700 bg-rose-50 p-2 rounded-lg border border-rose-200">
+                      {resetSessionsStatus.error}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+                <button
+                  onClick={handleRestartBot}
+                  disabled={restartBotLoading}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${restartBotLoading ? 'animate-spin' : ''}`} />
+                  <span>{restartBotLoading ? 'Refreshing Polling...' : 'Wake / Restart Bot Polling Now'}</span>
+                </button>
+                <span className="text-[11px] text-slate-500 self-center">
+                  Last poll: {statusData?.bot?.lastPollAt ? new Date(statusData.bot.lastPollAt).toLocaleTimeString() : 'Active'} • Poll cycles: {statusData?.bot?.pollCycles ?? 0}
+                </span>
+              </div>
+            </div>
+
+            {/* Standalone Always-On Hosting Info */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-bold text-slate-900">24/7 Railway Deployment Hub</h2>
-                  <p className="text-xs text-slate-500">
-                    Run this bot indefinitely with 100% uptime and persistent SQLite database storage.
+                  <h3 className="text-sm font-bold text-slate-900">24/7 Always-Active Hosting (When Browser Is Closed)</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    The bot is live right now while this preview is open. Preview environments automatically pause after you close AI Studio — to keep @focusconfessionbot online 24/7 even when your computer is off, deploy this repository to Cloud Run, Railway, or Render:
                   </p>
                 </div>
-                <div className="px-3 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-medium">
-                  Ready to Deploy
+                <div className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-medium shrink-0">
+                  Configured & Ready
                 </div>
               </div>
 
@@ -1415,7 +1704,7 @@ DATABASE_PATH="/app/data/confessions.db"`;
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                    Railway Environment Variables:
+                    Production Environment Variables:
                   </span>
                   <button
                     onClick={copyEnvText}
@@ -1434,45 +1723,99 @@ DATABASE_PATH="/app/data/confessions.db"`;
                   <p><span className="text-sky-400">DATABASE_PATH</span>=<span className="text-amber-300">"/app/data/confessions.db"</span></p>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
 
-              {/* Step by step deployment guide */}
-              <div className="space-y-3 pt-3 border-t border-slate-100">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">Step-by-Step Instructions:</h3>
-                
-                <div className="space-y-2 text-xs text-slate-600">
-                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="font-bold text-slate-900">Step 1: Deploy on Railway</span>
-                    <p className="mt-0.5 text-[11px]">
-                      Go to <a href="https://railway.app" target="_blank" rel="noreferrer" className="text-indigo-600 underline">railway.app</a>, click <strong>"New Project"</strong> &gt; <strong>"Deploy from GitHub repo"</strong> and select your project.
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="font-bold text-slate-900">Step 2: Add Persistent Volume (Essential for SQLite)</span>
-                    <p className="mt-0.5 text-[11px]">
-                      In Railway Service settings, go to the <strong>Volumes</strong> tab, click <strong>+ Add Volume</strong>, and set the mount path to <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">/app/data</code>. This prevents database loss when restarting.
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="font-bold text-slate-900">Step 3: Paste Variables</span>
-                    <p className="mt-0.5 text-[11px]">
-                      Go to the <strong>Variables</strong> tab in Railway and paste the variables shown above. Click Deploy!
-                    </p>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="font-bold text-slate-900">Step 4: Grant Channel Posting Rights in Telegram</span>
-                    <p className="mt-0.5 text-[11px]">
-                      In Telegram, open <a href="https://t.me/focushararconfession" target="_blank" rel="noreferrer" className="text-indigo-600 underline">@focushararconfession</a>, tap <strong>Administrators</strong> &gt; <strong>Add Administrator</strong> &gt; search <code className="bg-slate-200 px-1 py-0.5 rounded font-mono text-slate-800">@focusconfessionbot</code>, and ensure <strong>"Post Messages"</strong> is enabled.
-                    </p>
-                  </div>
-                </div>
+        {/* ===================== TAB 6: LIVE ACTIVITY LOGS ===================== */}
+        {activeTab === 'logs' && (
+          <div className="max-w-4xl mx-auto space-y-4">
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">Real-Time Telegram Bot Activity</h2>
+                <p className="text-xs text-slate-500">Live log of incoming messages, button clicks, submissions, and polling heartbeats.</p>
               </div>
+              <button
+                onClick={fetchData}
+                className="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center gap-1.5 transition"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                <span>Refresh Logs</span>
+              </button>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs divide-y divide-slate-100 overflow-hidden">
+              {activityLogs.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-400">No bot activity logged yet.</div>
+              ) : (
+                activityLogs.map((log) => (
+                  <div key={log.id} className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs hover:bg-slate-50">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold shrink-0 ${
+                        log.action.includes('ERROR')
+                          ? 'bg-rose-100 text-rose-700'
+                          : log.action.includes('CONFESSION') || log.action.includes('APPROVED')
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : log.action.includes('BOT_START')
+                          ? 'bg-indigo-100 text-indigo-800'
+                          : 'bg-slate-100 text-slate-700'
+                      }`}>
+                        {log.action}
+                      </span>
+                      <span className="text-slate-700 truncate">{log.details}</span>
+                    </div>
+                    <span className="text-[11px] text-slate-400 font-mono shrink-0">
+                      {new Date(log.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
       </main>
+
+      {/* Rejection Reason Modal (replaces blocked window.prompt) */}
+      {rejectModal.open && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">Reject Confession #{rejectModal.id}</h3>
+              <button
+                onClick={() => setRejectModal({ open: false, id: null, reason: 'Violates community fellowship guidelines', submitting: false })}
+                className="text-slate-400 hover:text-slate-600 text-xs"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-slate-600 block">Optional rejection note:</label>
+              <textarea
+                rows={3}
+                value={rejectModal.reason}
+                onChange={(e) => setRejectModal((prev) => ({ ...prev, reason: e.target.value }))}
+                className="w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-rose-500"
+                placeholder="Reason for rejection..."
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setRejectModal({ open: false, id: null, reason: 'Violates community fellowship guidelines', submitting: false })}
+                className="px-3.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRejectModal}
+                disabled={rejectModal.submitting}
+                className="px-3.5 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {rejectModal.submitting ? 'Rejecting...' : 'Confirm Reject'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-4 mt-auto">

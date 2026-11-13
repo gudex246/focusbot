@@ -32,9 +32,11 @@ function initializeDatabase(): Database.Database {
 
 const db = initializeDatabase();
 
-// Enable WAL mode for better concurrency
+// Enable WAL mode for better concurrency & sleep-safe persistence
 try {
   db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('wal_checkpoint(TRUNCATE)');
 } catch (e) {
   // Ignored if memory or WAL unsupported
 }
@@ -160,6 +162,7 @@ export const dbService = {
     db.prepare(`UPDATE confessions SET formatted_id = ? WHERE id = ?`).run(formattedId, id);
 
     this.logActivity('CONFESSION_SUBMITTED', `New confession submitted: ${formattedId} [${category}] [${language}]`);
+    this.checkpoint();
 
     return this.getConfessionById(id)!;
   },
@@ -247,6 +250,7 @@ export const dbService = {
     `).run(adminId, moderatorName, moderatedAt, channelMsgId || null, id);
 
     this.logActivity('CONFESSION_APPROVED', `Confession ${existing.formatted_id} approved by ${moderatorName} (${adminId})`);
+    this.checkpoint();
     return { success: true, confession: this.getConfessionById(id) };
   },
 
@@ -271,6 +275,7 @@ export const dbService = {
     `).run(adminId, moderatorName, moderatedAt, reason, id);
 
     this.logActivity('CONFESSION_REJECTED', `Confession ${existing.formatted_id} rejected by ${moderatorName} (${adminId}). Reason: ${reason}`);
+    this.checkpoint();
     return { success: true, confession: this.getConfessionById(id) };
   },
 
@@ -353,6 +358,10 @@ export const dbService = {
   },
 
   clearUserSession(telegramId: string) {
+    if (telegramId === 'ALL') {
+      db.prepare(`UPDATE user_profiles SET session_step = 'idle', session_category = NULL, session_text = NULL`).run();
+      return;
+    }
     db.prepare(`
       UPDATE user_profiles 
       SET session_step = 'idle', session_category = NULL, session_text = NULL 
@@ -511,6 +520,14 @@ export const dbService = {
       db.prepare(`INSERT INTO bot_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?`).run(key, value, value);
     } catch (e) {
       console.warn('Failed to set setting:', e);
+    }
+  },
+
+  checkpoint(mode: 'PASSIVE' | 'TRUNCATE' = 'PASSIVE') {
+    try {
+      db.pragma(`wal_checkpoint(${mode})`);
+    } catch (e) {
+      // Ignore if DB closed or in-memory
     }
   },
 };

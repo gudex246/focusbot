@@ -90,7 +90,7 @@ Please select an option below to begin:`,
     btn_confirm: '✅ Confirm & Send Anonymously',
     btn_back: '🔙 Main Menu',
 
-    choose_category: `📂 <b>Step 1 of 2: Select a Category</b>\n\nPlease choose the category that best describes your message:`,
+    choose_category: `📂 <b>Step 1 of 2: Select a Category</b>\n\nTap a category below, <i>or simply type your message right now and send it!</i>\n(Default: 🙏 Prayer Request)`,
     write_prompt: (catName: string) =>
       `✍️ <b>Step 2 of 2: Write Your Message</b>\n\nCategory: <b>${escapeHtml(catName)}</b>\n\nPlease type your message below and send it. Take your time. Your privacy is strictly preserved.`,
     confirm_prompt: (catName: string, text: string) =>
@@ -135,7 +135,7 @@ Please select an option below to begin:`,
     btn_confirm: '✅ አረጋግጥና በድብቅ ላክ',
     btn_back: '🔙 ወደ ዋናው ማውጫ',
 
-    choose_category: `📂 <b>ደረጃ 1 ከ 2: የምድብ ምርጫ</b>\n\nእባክዎ ለመልእክትዎ የሚስማማውን ምድብ ይምረጡ:`,
+    choose_category: `📂 <b>ደረጃ 1 ከ 2: የምድብ ምርጫ</b>\n\nከታች ካሉት ምድቦች ይምረጡ፣ <i>ወይም መልእክትዎን አሁኑኑ ጽፈው ይላኩ!</i>\n(ቀጥታ ከጻፉ: 🙏 የጸሎት ጥያቄ)`,
     write_prompt: (catName: string) =>
       `✍️ <b>ደረጃ 2 ከ 2: መልእክትዎን ይጻፉ</b>\n\nምድብ: <b>${escapeHtml(catName)}</b>\n\nእባክዎ መልእክትዎን ከታች ጽፈው ይላኩ። ማንነትዎ ፍፁም ሚስጥር እንደሆነ ይቆያል።`,
     confirm_prompt: (catName: string, text: string) =>
@@ -180,7 +180,7 @@ Jalqabuuf filannoowwan armaan gadii keessaa tokko filadhaa:`,
     btn_confirm: '✅ Mirkaneessiitii Ergi',
     btn_back: '🔙 Gara Ka\'umsaatti',
 
-    choose_category: `📂 <b>Sadarkaa 1ffaa: Ramaddii Filadhaa</b>\n\nMaaloo ramaddii ergaa keessaniif ta'u filadhaa:`,
+    choose_category: `📂 <b>Sadarkaa 1ffaa: Ramaddii Filadhaa</b>\n\nRamaddii armaan gadii filadhaa, <i>ykn ammumuma ergaa keessan barreessaa ergaa!</i>\n(Kallattiin yoo barreessitan: 🙏 Gaaffii Kadhannaa)`,
     write_prompt: (catName: string) =>
       `✍️ <b>Sadarkaa 2ffaa: Ergaa keessan barreessaa</b>\n\nRamaddii: <b>${escapeHtml(catName)}</b>\n\nMaaloo ergaa keessan armaan gaditti barreessaa ergaa. Eenyummaan keessan guutummaatti iccitii ta'ee hafa.`,
     confirm_prompt: (catName: string, text: string) =>
